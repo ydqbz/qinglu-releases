@@ -1,0 +1,137 @@
+name: Build Qinglu macOS 0.2.3
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha256:
+        description: SHA256 of the private draft build input ZIP
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: qinglu-macos-023
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Read and verify private draft build input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == 'ydqbz/qinglu-releases' ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          mkdir -p _input package
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > _input/releases.json
+          node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync("_input/releases.json"));const a=r.filter(x=>x.draft&&x.name==="Internal Mac build input 0.2.3 - DO NOT PUBLISH");if(a.length!==1)throw Error("Expected one private input draft");const f=a[0].assets.filter(x=>x.name==="Qinglu-macOS-source-r2.zip");if(f.length!==1)throw Error("Expected source asset");fs.writeFileSync("_input/asset-id",String(f[0].id));'
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$(cat _input/asset-id)" > _input/source.zip
+          echo "$EXPECTED_SHA256  _input/source.zip" | shasum -a 256 --check
+          unzip -q _input/source.zip -d package
+      - name: Install locked build dependencies
+        working-directory: package/app
+        run: npm ci --no-audit --no-fund
+      - name: Test application and Mac release tools
+        working-directory: package
+        run: |
+          set -euo pipefail
+          cd app
+          npm test
+          cd ..
+          node scripts/test-macos-tools.cjs
+          node scripts/test-macos-engines.cjs
+      - name: Prepare verified native media engines and icon
+        working-directory: package
+        run: |
+          set -euo pipefail
+          node scripts/prepare-macos-engines.cjs --arch=${{ matrix.arch }}
+          node scripts/prepare-macos-icon.cjs
+      - name: Build DMG and ZIP with ad-hoc signature
+        working-directory: package/app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx --no-install electron-builder --config electron-builder.cjs --mac dmg zip --${{ matrix.arch }} --publish never
+      - name: Verify packaged release and execute real application
+        working-directory: package
+        run: |
+          set -euo pipefail
+          mkdir -p public-results
+          node scripts/verify-macos-release.cjs --dist dist/0.2.3 --arch ${{ matrix.arch }} --version 0.2.3 --report public-results/verify-${{ matrix.arch }}.json
+          APP="$(find dist/0.2.3 -maxdepth 2 -type d -name '*.app' -print -quit)"
+          node scripts/smoke-macos.cjs --app "$APP" --arch ${{ matrix.arch }} --report public-results/smoke-${{ matrix.arch }}.json --diagnostic-root "$RUNNER_TEMP/qinglu-diagnostic-${{ matrix.arch }}"
+          cp "$RUNNER_TEMP/qinglu-diagnostic-${{ matrix.arch }}/data/"*.png public-results/
+          cp engine-verification-${{ matrix.arch }}.json public-results/engines-${{ matrix.arch }}.json
+          cp scripts/verify-macos-release.cjs public-results/
+          cp dist/0.2.3/Qinglu-0.2.3-macOS-${{ matrix.arch }}.dmg public-results/
+          cp dist/0.2.3/Qinglu-0.2.3-macOS-${{ matrix.arch }}.zip public-results/
+          cp dist/0.2.3/latest-mac.yml public-results/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS-${{ matrix.arch }}
+          path: package/public-results/*
+          if-no-files-found: error
+          retention-days: 7
+  synchronize-draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macOS-*
+          path: collected
+      - name: Merge architecture metadata
+        run: |
+          set -euo pipefail
+          npm install --no-save --ignore-scripts --package-lock=false js-yaml@4.3.2
+          node collected/macOS-arm64/verify-macos-release.cjs --merge --input collected/macOS-arm64 --input collected/macOS-x64 --out combined --version 0.2.3 --report combined/merge-report.json
+          cp collected/macOS-arm64/*.json collected/macOS-arm64/*.png combined/
+          cp collected/macOS-x64/*.json collected/macOS-x64/*.png combined/
+      - name: Add Mac files to the existing 0.2.3 draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          node <<'NODE'
+          const fs=require('fs'),crypto=require('crypto'),cp=require('child_process');
+          const repo=process.env.GITHUB_REPOSITORY;
+          if(repo!=='ydqbz/qinglu-releases')throw Error('Wrong repository');
+          const targets=JSON.parse(fs.readFileSync('releases.json')).filter(x=>x.draft&&x.assets.some(a=>a.name==='Qinglu-0.2.3-Setup-x64.exe'));
+          if(targets.length!==1)throw Error('Expected one existing Windows 0.2.3 draft');
+          const target=targets[0];
+          const windows={'Qinglu-0.2.3-Setup-x64.exe':'c648c896a416102ee63c6fcf394c5d42b23ff92679e45cf41da3ffcc53be5d30','Qinglu-0.2.3-Portable-x64.exe':'8d998e745813236a1613fdf4a2f4981fd7ff235ab56014bb32c83e75419527ea','latest.yml':'f52860865cbc736ee6f3e05e49e02f4a5ac2b802cdacb43fbeed2e57af0e3457','Qinglu-0.2.3-Setup-x64.exe.blockmap':'1ac471147c9284a37410b7af3801b5a44cdd75a19c177965267504731bde3f86'};
+          for(const [name,hash]of Object.entries(windows))if(!target.assets.some(a=>a.name===name&&a.digest==='sha256:'+hash))throw Error('Windows asset changed: '+name);
+          for(const name of fs.readdirSync('combined')){
+            if(!/^Qinglu-0\.2\.3-macOS-(arm64|x64)\.(dmg|zip)$|^latest-mac\.yml$|^SHA256SUMS-macOS\.txt$|^(verify|smoke|engines)-(arm64|x64)\.json$|^merge-report\.json$|^macOS-(arm64|x64)-(light|dark)\.png$/.test(name))throw Error('Unexpected public result: '+name);
+            const file='combined/'+name,data=fs.readFileSync(file),hash='sha256:'+crypto.createHash('sha256').update(data).digest('hex');
+            const existing=target.assets.find(a=>a.name===name);
+            if(existing){if(existing.digest!==hash)throw Error('Existing different Mac asset: '+name);continue;}
+            const url=target.upload_url.replace(/\{.*$/,'')+'?name='+encodeURIComponent(name);
+            cp.execFileSync('gh',['api','--method','POST','-H','Content-Type: application/octet-stream',url,'--input',file],{stdio:['ignore','ignore','inherit']});
+            console.log('Uploaded '+name);
+          }
+          console.log('Mac files synchronized; release remains DRAFT.');
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS-combined
+          path: combined/*
+          retention-days: 7
