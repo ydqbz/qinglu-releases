@@ -1,11 +1,15 @@
 name: Build Qinglu macOS 0.2.3
 on:
+  push:
+    paths:
+      - '.github/workflows/macos-023.yml'
   workflow_dispatch:
     inputs:
       source_sha256:
         description: SHA256 of the private draft build input ZIP
         required: true
         type: string
+        default: 0f3932f5e7f9cc38222ff4b78d99b4b71488e565dd7bc82437decb878d4dc300
 permissions:
   contents: read
 concurrency:
@@ -32,14 +36,14 @@ jobs:
       - name: Read and verify private draft build input
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA256: ${{ inputs.source_sha256 }}
+          EXPECTED_SHA256: ${{ inputs.source_sha256 || '0f3932f5e7f9cc38222ff4b78d99b4b71488e565dd7bc82437decb878d4dc300' }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == 'ydqbz/qinglu-releases' ]]
           [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
           mkdir -p _input package
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > _input/releases.json
-          node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync("_input/releases.json"));const a=r.filter(x=>x.draft&&x.name==="Internal Mac build input 0.2.3 - DO NOT PUBLISH"&&x.assets.some(a=>a.name==="Qinglu-macOS-source-r2.zip"));if(a.length!==1)throw Error("Expected one private input draft");const f=a[0].assets.filter(x=>x.name==="Qinglu-macOS-source-r2.zip");if(f.length!==1)throw Error("Expected source asset");fs.writeFileSync("_input/asset-id",String(f[0].id));'
+          node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync("_input/releases.json"));const a=r.filter(x=>x.draft&&x.name==="Internal Mac build input 0.2.3 - DO NOT PUBLISH"&&x.assets.some(a=>a.name==="Qinglu-macOS-source-r3.zip"));if(a.length!==1)throw Error("Expected one private input draft");const f=a[0].assets.filter(x=>x.name==="Qinglu-macOS-source-r3.zip");if(f.length!==1)throw Error("Expected source asset");fs.writeFileSync("_input/asset-id",String(f[0].id));'
           gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$(cat _input/asset-id)" > _input/source.zip
           echo "$EXPECTED_SHA256  _input/source.zip" | shasum -a 256 --check
           python3 -m zipfile -e _input/source.zip package
