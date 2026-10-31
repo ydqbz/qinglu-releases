@@ -1,0 +1,43 @@
+name: Prepare Qinglu 0.3.0 release draft
+on:
+  push:
+    paths: ['.github/workflows/prepare-030-release.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: qinglu-release-030
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Prepare draft and preserve existing Mac distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ydqbz/qinglu-releases
+        run: |
+          set -euo pipefail
+          mkdir files
+          gh release download v0.2.3 --dir files --pattern 'Qinglu-0.2.3-macOS-*' --pattern latest-mac.yml
+          gh api repos/ydqbz/qinglu-releases/releases/tags/v0.2.3 > previous.json
+          python3 - <<'PY'
+          import json, pathlib, hashlib
+          old=json.load(open('previous.json'))
+          assert not old['draft'] and old['tag_name']=='v0.2.3'
+          assets={a['name']:a for a in old['assets']}
+          files=list(pathlib.Path('files').iterdir())
+          assert len(files)==5
+          for f in files:
+              a=assets[f.name]
+              assert f.stat().st_size==a['size']
+              assert 'sha256:'+hashlib.file_digest(f.open('rb'),'sha256').hexdigest()==a['digest']
+          PY
+          if gh release view v0.3.0 --json isDraft > existing.json 2>/dev/null; then
+            python3 -c 'import json; assert json.load(open("existing.json"))["isDraft"], "Already published; refuse changes"'
+          else
+            printf '%s\n' 'Windows 0.3.0 release preparation. Mac remains 0.2.3. Windows packages and final release notes will be added after verification.' > notes.md
+            gh release create v0.3.0 --draft --title '轻录 0.3.0 · Windows 工作台与字幕工具' --notes-file notes.md
+          fi
+          gh release upload v0.3.0 files/*
