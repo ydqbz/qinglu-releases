@@ -1,0 +1,32 @@
+name: Rebuild and publish verified Qinglu 0.3.0
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/rebuild-030.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: qinglu-release-030
+  cancel-in-progress: false
+jobs:
+  rebuild:
+    if: github.repository == 'ydqbz/qinglu-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect approved release and verified existing attachments
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/release-tools/upload-reconstructed-030.py inspect
+      - name: Recreate missing archives from distribution packages
+        if: steps.inspect.outputs.rebuild == 'true'
+        run: python3 .github/release-tools/reconstruct-030.py .github/release-tools/recipe-030.gz
+      - name: Verify local and remote bytes, upload missing archives and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/release-tools/upload-reconstructed-030.py publish
