@@ -16,6 +16,9 @@ spec.loader.exec_module(verify)
 RELEASE_ID = 429695398
 RELEASE_PATH = f"repos/{verify.REPO}/releases/{RELEASE_ID}"
 ARCHIVES = [f"Qinglu-0.3.0-AI-Windows-part{n}.zip" for n in (1, 2, 3)]
+TRANSFER_STARTER = "Qinglu-0.3.0-transfer-part1-001.bin"
+STARTER_IDS = {ARCHIVES[0]: 705992884, ARCHIVES[1]: 705996183, ARCHIVES[2]: 705998105,
+               TRANSFER_STARTER: 707952347}
 
 
 def inventory():
@@ -34,9 +37,14 @@ def inventory():
         combined[name] = asset
     release = dict(release, assets=list(combined.values()))
     verify.guard_release(release)
-    verify.require(set(combined) <= set(verify.FINAL), "Unapproved release attachment")
+    verify.require(set(combined) <= set(verify.FINAL) | {TRANSFER_STARTER}, "Unapproved release attachment")
+    if TRANSFER_STARTER in combined:
+        verify.require(release["draft"] is True and stale_starter(combined[TRANSFER_STARTER]),
+                       "Unexpected transport attachment")
     for name, record in verify.FINAL.items():
         asset = combined.get(name)
+        if name in ARCHIVES and asset and asset.get("state") != "uploaded":
+            verify.require(stale_starter(asset), "Unexpected unfinished archive: " + name)
         if name not in ARCHIVES or (asset and asset.get("state") == "uploaded"):
             verify.require(asset is not None, "Missing pre-existing asset: " + name)
             verify.verify_uploaded(asset, record)
@@ -48,10 +56,30 @@ def inventory():
 
 
 def stale_starter(asset):
-    if asset.get("state") != "starter" or asset.get("size") != 0 or asset.get("digest"):
+    name = asset.get("name")
+    if name not in STARTER_IDS or asset.get("id") != STARTER_IDS[name]:
+        return False
+    expected = verify.FINAL.get(name) or verify.CHUNKS[name]
+    if asset.get("state") != "starter" or asset.get("size") != expected["size"] or asset.get("digest") is not None:
         return False
     updated = dt.datetime.fromisoformat(asset["updated_at"].replace("Z", "+00:00"))
     return (dt.datetime.now(dt.timezone.utc) - updated) >= dt.timedelta(hours=2)
+
+
+def remove_starter(name):
+    release, assets = inventory()
+    asset = assets.get(name)
+    if not asset:
+        return
+    verify.require(release["draft"] is True and stale_starter(asset), "Starter changed: " + name)
+    if name == TRANSFER_STARTER:
+        verify.require(ARCHIVES[0] in assets, "Expected verified part 1 before transport cleanup")
+        verify.verify_uploaded(assets[ARCHIVES[0]], verify.FINAL[ARCHIVES[0]])
+    path = f"repos/{verify.REPO}/releases/assets/{asset['id']}"
+    current = verify.api(path)
+    verify.require(current["name"] == name and current["id"] == asset["id"] and stale_starter(current),
+                   "Starter changed before removal: " + name)
+    verify.api(path, "DELETE")
 
 
 def upload(name):
@@ -60,13 +88,7 @@ def upload(name):
         return
     verify.require(name in ARCHIVES and release["draft"], "Expected missing AI archive in draft")
     if name in assets:
-        asset = assets[name]
-        verify.require(stale_starter(asset), "Unfinished attachment may still be active: " + name)
-        path = f"repos/{verify.REPO}/releases/assets/{asset['id']}"
-        current = verify.api(path)
-        verify.require(current["name"] == name and current["id"] == asset["id"] and stale_starter(current),
-                       "Starter changed before removal: " + name)
-        verify.api(path, "DELETE")
+        remove_starter(name)
     # Upload by pinned release ID. Never follow redirects with the write token.
     record = verify.FINAL[name]
     connection = http.client.HTTPSConnection("uploads.github.com", timeout=600)
@@ -107,6 +129,7 @@ def main():
         verify.verify_file(Path("reconstructed") / name, verify.FINAL[name])
     for name in missing:
         upload(name)
+    remove_starter(TRANSFER_STARTER)
     release, _ = inventory()
     verify.verify_final_set(release)
     verify.verify_small_files()

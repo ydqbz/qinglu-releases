@@ -2,7 +2,9 @@ name: Rebuild and publish verified Qinglu 0.3.0
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/rebuild-030.yml]
+    paths:
+      - .github/workflows/rebuild-030.yml
+      - '.github/release-tools/**'
   workflow_dispatch:
 permissions:
   contents: write
